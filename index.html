@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OAuth for Remote MCP Servers</title>
+  <style>
+    :root {
+      --ink: #0f2942; --muted: #5b7186; --line: #e3e9f0;
+      --brand: #0b7285; --brand-soft: #e6f4f6; --up: #e03131; --ok: #2f9e44; --warn: #c9831f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 48px 20px 90px; background: #eef2f6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink); line-height: 1.55;
+    }
+    .doc {
+      max-width: 940px; margin: 0 auto; background: #fff;
+      border: 1px solid var(--line); border-radius: 14px;
+      padding: 40px 50px 50px; box-shadow: 0 8px 30px rgba(15,41,66,.08);
+    }
+    h1 { font-size: 31px; font-weight: 800; margin: 0 0 6px; }
+    .meta { color: var(--muted); font-size: 14.5px; margin-bottom: 26px; border-bottom: 3px solid var(--brand); padding-bottom: 18px; }
+    h2 { font-size: 21px; font-weight: 700; margin: 38px 0 12px; }
+    h3 { font-size: 17px; font-weight: 700; margin: 28px 0 4px; }
+    h3 .pill { font-size: 11px; vertical-align: middle; margin-left: 8px; }
+    p { margin: 10px 0; }
+    ul { margin: 10px 0; padding-left: 22px; }
+    li { margin: 6px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .87em; background: #eef2f6; color: #0c4a57; padding: 1.5px 6px; border-radius: 5px; }
+    .callout { background: var(--brand-soft); border-left: 4px solid var(--brand); border-radius: 8px; padding: 16px 20px; margin: 6px 0 8px; }
+    .callout .label { font-size: 11.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--brand); display: block; margin-bottom: 6px; }
+    .cast { list-style: none; padding: 0; }
+    .cast li { padding: 9px 0; border-bottom: 1px solid var(--line); }
+    .cast li:last-child { border-bottom: none; }
+    .cast b { color: var(--brand); }
+
+    table.matrix { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 14px 0; }
+    table.matrix th, table.matrix td { text-align: left; padding: 10px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    table.matrix th { color: var(--muted); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+    table.matrix tr:last-child td { border-bottom: none; }
+    table.matrix .c { color: var(--brand); font-weight: 600; }
+
+    .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .pill.ok { background: #eaf7ee; color: var(--ok); }
+    .pill.wait { background: #fbf3e3; color: var(--warn); }
+    .pill.stop { background: #fbe3e3; color: var(--up); }
+
+    figure { margin: 16px 0 8px; }
+    .chart { background: #fafcfd; border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow-x: auto; }
+    .chart .mermaid { text-align: center; }
+    figcaption { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+    .axes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 14px 0; }
+    .axis { background: #f5f7fa; border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+    .axis h4 { margin: 0 0 6px; font-size: 15px; color: var(--brand); }
+    .axis p { font-size: 14px; margin: 6px 0; }
+  </style>
+</head>
+<body>
+  <div class="doc">
+    <h1>OAuth for Remote MCP Servers</h1>
+    <div class="meta">
+      How each AI assistant signs in to a remote MCP (Model Context Protocol)
+      server, and why the flow differs by client and by where it runs.
+    </div>
+
+    <div class="callout">
+      <span class="label">Overview</span>
+      The protocol throughout is standard <strong>OAuth 2.1</strong> — an open,
+      widely implemented authorization standard. The human sign-in runs through
+      <strong>oauth2-proxy</strong>, one of the most widely deployed open-source
+      auth proxies; the only deployment-specific piece is a thin, spec-conforming
+      authorization server (the <code>/oauth</code> endpoints) that hands MCP
+      clients their tokens. Every client ends up the same way — a person signs in
+      against Google (restricted to your organization's domain), and the client
+      holds a short-lived <strong>bearer token</strong> it presents on each
+      <code>/mcp</code> call. Two things differ between assistants:
+      <strong>where the client runs</strong> (a machine on the VPN —
+      <em>private</em> — vs. the vendor's cloud — <em>public</em>), which decides
+      the host it reaches; and <strong>what kind of OAuth client it is</strong> —
+      a public client proving itself with PKCE (Proof Key for Code Exchange, which
+      lets a client with no secret prove the token request comes from the same
+      client that started the flow), or a confidential client proving itself with
+      a secret.
+    </div>
+
+    <h2>The participants</h2>
+    <ul class="cast">
+      <li><b>oauth2-proxy</b> — the public-facing reverse proxy. It authenticates the human against Google (the sign-in restricted to your organization's domain) and forwards the verified identity to the app behind it. Only oauth2-proxy faces the internet. It is a mature, heavily-deployed open-source project — the standard way to put Google/OIDC (OpenID Connect) single sign-on in front of a service, widely used in Kubernetes deployments — so the most security-sensitive leg of the flow (the OAuth exchange with the identity provider) runs on battle-tested code.</li>
+      <li><b>The MCP server</b> — the app on a loopback port behind the proxy. It plays two roles: the OAuth <em>authorization server</em> (<code>/oauth/authorize</code>, <code>/oauth/token</code>, <code>/oauth/register</code>, <code>.well-known</code> discovery) and the <code>/mcp</code> tool endpoint. It mints codes and tokens, and validates a token on every <code>/mcp</code> call.</li>
+      <li><b>Google</b> — the identity provider oauth2-proxy delegates the actual sign-in to.</li>
+      <li><b>The MCP client</b> — whatever holds the token and calls the tools: a <em>local</em> client (Claude Code, Cursor) on a machine, or a <em>cloud</em> client (Claude Desktop, Gemini Enterprise) on the vendor's servers.</li>
+      <li><b>The user's browser</b> — where the person completes the Google sign-in.</li>
+    </ul>
+
+    <h2>The two axes</h2>
+    <div class="axes">
+      <div class="axis">
+        <h4>Private vs. public — where the client runs</h4>
+        <p><strong>Private/local</strong> clients (Claude Code, Cursor) run on a VPN-connected machine and reach the internal host <code>mcp.internal.example</code> with a loopback callback.</p>
+        <p><strong>Public/cloud</strong> clients (Claude Desktop, Gemini Enterprise) run in the vendor's cloud and reach the public host <code>mcp.example.com</code> — which is why the server has to be reachable from the internet.</p>
+      </div>
+      <div class="axis">
+        <h4>Public vs. confidential — the OAuth client type</h4>
+        <p><strong>Public clients</strong> self-register at runtime (dynamic registration) and prove themselves with <strong>PKCE</strong>, no secret — Claude Code, Cursor, and Claude Desktop.</p>
+        <p>A <strong>confidential client</strong> is pre-provisioned once with a <code>client_id</code> + secret and proves itself with that <strong>secret</strong> — only Gemini Enterprise.</p>
+      </div>
+    </div>
+
+    <h2>The configurations at a glance</h2>
+    <table class="matrix">
+      <thead>
+        <tr><th>Assistant</th><th>Client runs</th><th>Host it reaches</th><th>OAuth client</th><th>Proves itself with</th><th>Notes / requirements</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="c">Claude Code (CLI)</td><td>local machine · VPN</td><td>internal host</td><td>dynamic, public</td><td>PKCE</td><td>works once registered</td></tr>
+        <tr><td class="c">Cursor (IDE)</td><td>local machine · VPN</td><td>internal host</td><td>dynamic, public</td><td>PKCE</td><td>works via the <code>mcp-remote</code> shim *</td></tr>
+        <tr><td class="c">Claude Desktop</td><td>Anthropic cloud</td><td>public host</td><td>dynamic, public</td><td>PKCE</td><td>works once registered</td></tr>
+        <tr><td class="c">Gemini Enterprise</td><td>Google cloud</td><td>public host</td><td>pre-provisioned, confidential</td><td>client secret</td><td>requires a Gemini Enterprise license + admin connector registration</td></tr>
+        <tr><td class="c">Cursor Cloud Agents</td><td>Cursor cloud</td><td>public host</td><td>dynamic / static</td><td>PKCE / secret</td><td>requires a Cursor team admin to add the server</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:13px; color:var(--muted)">* Cursor's local IDE connects through the <code>mcp-remote</code> shim — see its section.</p>
+
+    <h2>Claude Code &amp; Cursor — private (VPN)</h2>
+    <p>
+      This is the local baseline: the client runs on the user's machine, so it completes the full OAuth
+      flow from inside the VPN with a <strong>loopback callback</strong>
+      (<code>127.0.0.1</code>). It self-registers (dynamic registration), the loopback
+      redirect is allowlisted, and the authorization code never leaves the machine.
+      It is a <strong>public client</strong>: no secret — PKCE ties the token request
+      back to the same client that started the flow.
+    </p>
+    <figure>
+      <div class="chart"><pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant CLI as Claude Code or Cursor
+    participant PX as oauth2-proxy
+    participant MM as MCP server
+    participant G as Google
+    Note over CLI,G: The client runs on the user's machine, behind the VPN
+    CLI->>MM: POST /oauth/register (loopback redirect_uri)
+    MM-->>CLI: 201 client_id and no secret (loopback allowlisted)
+    CLI->>PX: open browser to /oauth/authorize
+    PX->>G: run Google sign-in
+    G-->>PX: organization-domain user verified
+    PX->>MM: forward /oauth/authorize with the verified identity
+    MM-->>CLI: 302 to the loopback callback with a code
+    CLI->>MM: POST /oauth/token (code + PKCE verifier)
+    MM-->>CLI: access token
+    CLI->>MM: call /mcp with Authorization Bearer token
+    MM-->>CLI: tool results
+      </pre></div>
+      <figcaption>Local PKCE flow — everything but the Google sign-in stays on the user's machine and the VPN.</figcaption>
+    </figure>
+
+    <h3>The Cursor exception</h3>
+    <p>
+      Cursor follows the same local flow, but a <a href="https://forum.cursor.com/t/oauth-browser-redirect-not-triggered-for-http-based-mcp-servers/146988" target="_blank" rel="noopener">known Cursor bug</a> stops the IDE from
+      opening the browser after it registers — so the sign-in step never starts. The
+      workaround is the <code>mcp-remote</code> shim
+      (<code>npx -y mcp-remote@latest https://mcp.internal.example/mcp</code>), which
+      runs the OAuth flow itself and hands Cursor a working connection. Nothing on
+      the server changes.
+    </p>
+
+    <h2>Claude Desktop — public (cloud)</h2>
+    <p>
+      Claude Desktop's connector runs in <strong>Anthropic's cloud</strong>, so it
+      reaches the <strong>public</strong> host. It is still a <strong>public client</strong>:
+      it discovers the server's endpoints and registers itself dynamically (PKCE, no
+      secret), exactly like the local clients — the only difference is that the
+      callback is a cloud URL (<code>claude.ai</code>) instead of loopback, so the
+      authorization code transits Anthropic's servers. The person still signs in with
+      their organization-domain Google account in the browser.
+    </p>
+    <figure>
+      <div class="chart"><pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as User browser
+    participant CD as Claude (Anthropic cloud)
+    participant PX as oauth2-proxy
+    participant MM as MCP server
+    participant G as Google
+    Note over CD,MM: Claude discovers and registers itself — PKCE public client, no secret
+    CD->>MM: GET /.well-known + POST /oauth/register
+    MM-->>CD: discovery docs + 201 client_id (no secret)
+    U->>PX: GET /oauth/authorize (opened by Claude)
+    PX->>G: run Google sign-in
+    G-->>PX: organization-domain user verified
+    PX->>MM: forward /oauth/authorize with the verified identity
+    MM-->>U: 302 to Claude's redirect (claude.ai) with a code
+    U->>CD: the code lands on Anthropic's servers
+    CD->>MM: POST /oauth/token (code + PKCE verifier)
+    MM-->>CD: access token
+    CD->>MM: call /mcp with Authorization Bearer token
+    MM-->>CD: tool results
+      </pre></div>
+      <figcaption>Cloud PKCE flow — like the local one, but the callback and token-bearing calls originate from Anthropic's cloud, so the server must be public.</figcaption>
+    </figure>
+
+    <h2>Gemini Enterprise — public (cloud), confidential <span class="pill wait">requires license + admin registration</span></h2>
+    <p>
+      Gemini Enterprise is the one <strong>confidential client</strong>. Instead of
+      registering itself at runtime, an admin mints a <code>client_id</code> +
+      <strong>secret</strong> once (out of band) and enters them into the Gemini
+      Enterprise connector config. The connector runs in <strong>Google's cloud</strong>
+      and reaches the public host. The human still signs in (legs 1–6); then,
+      server-to-server with no browser, Google's cloud exchanges the code for a token
+      using its <strong>secret</strong> (leg 7) and calls <code>/mcp</code> (leg 9).
+      This path requires a Gemini Enterprise license and admin registration of the
+      connector on the Google side.
+    </p>
+    <figure>
+      <div class="chart"><pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as User browser
+    participant V as Google cloud
+    participant PX as oauth2-proxy
+    participant MM as MCP server
+    participant G as Google
+    Note over V,MM: Pre-provisioned client_id + secret (registered once, not at runtime)
+    Note over U,G: Per-user sign-in
+    U->>PX: GET /oauth/authorize (sent by the connector)
+    PX->>G: run Google sign-in
+    G-->>PX: organization-domain user verified
+    PX->>MM: forward /oauth/authorize with the verified identity
+    MM-->>U: 302 to the connector's redirect_uri with a code
+    U->>V: the code lands on Google's servers
+    Note over V,MM: Token exchange and tool call
+    V->>MM: POST /oauth/token (code + client secret)
+    MM-->>V: access token
+    V->>MM: call /mcp with Authorization Bearer token
+    MM-->>V: tool results
+      </pre></div>
+      <figcaption>Confidential cloud flow — the connector proves itself with a pre-shared secret at token exchange (leg 7) rather than PKCE. Note the two "Googles": <em>Google cloud</em> is the connector (the OAuth client, redirecting through <code>vertexaisearch.cloud.google.com</code>); <em>Google</em> is the identity provider that signs the person in.</figcaption>
+    </figure>
+
+    <h2>Cursor Cloud Agents — public (cloud) <span class="pill stop">requires team admin</span></h2>
+    <p>
+      Cursor's Cloud Agents would reach the public host like Gemini Enterprise and
+      Claude Desktop (Streamable HTTP, with OAuth). But adding the server is gated by
+      Cursor's own permissions — only a <strong>Cursor team admin</strong> can add an
+      MCP server to the team ("Only team admins can manage the default team
+      marketplace"). Until an admin adds the server, no OAuth flow runs, so there is
+      no completed flow to diagram. This is a vendor-side gate, not a property of the
+      OAuth design.
+    </p>
+
+    <h2>References</h2>
+    <p>
+      The OAuth 2.1 backbone here is well-trodden: the authorization flow, PKCE,
+      dynamic client registration, and Protected Resource Metadata discovery all
+      follow the published standard and the common explainers.
+    </p>
+    <ul>
+      <li><a href="https://modelcontextprotocol.io/specification/draft/basic/authorization">Authorization — Model Context Protocol specification</a> — the source of truth: OAuth 2.1, PKCE (S256) for every client, and the 401 → metadata discovery sequence.</li>
+      <li><a href="https://medium.com/@yagmur.sahin/remote-mcp-in-the-real-world-oauth-2-1-9d149de6e475">Remote MCP in the Real World: OAuth 2.1, Dynamic Client Registration, and Protected Resource Metadata</a></li>
+      <li><a href="https://mcp.directory/blog/oauth-21-for-remote-mcp-servers-streamable-http-explained-2026">OAuth 2.1 for Remote MCP Servers — Streamable HTTP explained (2026)</a></li>
+      <li><a href="https://www.scalekit.com/blog/ship-secure-mcp-server">Scalekit — Secure your MCP servers with OAuth 2.1</a> · <a href="https://aembit.io/blog/mcp-oauth-2-1-pkce-and-the-future-of-ai-authorization/">Aembit — MCP, OAuth 2.1, PKCE, and the Future of AI Authorization</a></li>
+      <li><a href="https://sunpeak.ai/blogs/claude-connector-oauth-authentication/">Claude Connector Authentication: How OAuth Works and When You Need It</a> and <a href="https://platform.claude.com/docs/en/agents-and-tools/mcp-connector">Anthropic — MCP connector</a> — the Claude Desktop leg.</li>
+    </ul>
+
+    <h3>The takeaway</h3>
+    <p>
+      The protocol is not the interesting part — the standard is borrowed and
+      identical for every client. What varies, and what this comparison maps, are
+      the two axes that decide everything else: where the client runs (private/VPN
+      vs. public/cloud), which fixes the host it reaches; and how it proves itself
+      (PKCE vs. a pre-shared secret), which fixes whether it can self-register or
+      must be provisioned by an admin. The deployment shape that makes this work is
+      worth naming: front the server with oauth2-proxy for the Google sign-in, place
+      a thin spec-conforming authorization server behind it, and split the work
+      across an internal host for VPN-local clients and a public host for cloud
+      clients. Within that shape, only a confidential client (Gemini Enterprise)
+      needs a pre-shared secret, and the practical friction is rarely the protocol —
+      it is vendor-side gates such as a client browser-open bug or a team-admin
+      permission on adding the server.
+    </p>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        fontSize: '15px',
+        primaryColor: '#e6f4f6', primaryBorderColor: '#0b7285', primaryTextColor: '#0f2942',
+        lineColor: '#8aa0b2', actorBkg: '#e6f4f6', actorBorder: '#0b7285', actorTextColor: '#0f2942',
+        signalColor: '#5b7186', signalTextColor: '#0f2942',
+        noteBkgColor: '#fff6e6', noteBorderColor: '#f0d9a8', noteTextColor: '#8a6d2f',
+      },
+    });
+  </script>
+</body>
+</html>
