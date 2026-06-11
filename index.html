@@ -174,7 +174,8 @@ sequenceDiagram
       it discovers the server's endpoints and registers itself dynamically (PKCE, no
       secret), exactly like the local clients — the only difference is that the
       callback is a cloud URL (<code>claude.ai</code>) instead of loopback, so the
-      authorization code transits Anthropic's servers. The person still signs in with
+      authorization code — minted by your server, not by Google — transits
+      Anthropic's servers. The person still signs in with
       their organization-domain Google account in the browser.
     </p>
     <figure>
